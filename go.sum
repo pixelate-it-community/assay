@@ -1,0 +1,8 @@
+github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
+github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
+github.com/pixelate-it/molten v0.0.0-20260807013501-a33b7f021e3d h1:YM+XFY1gVh1034hzrSkzSZ/YjIYJ5mn4Y0c3CL7Kix8=
+github.com/pixelate-it/molten v0.0.0-20260807013501-a33b7f021e3d/go.mod h1:db1eATzjVipDsEZk6YWhFlpkZJ709o5GQJ1Ct73aS8s=
+github.com/pixelate-it/molten v0.0.0-20260807231315-d308948f6860 h1:vQOExpDWN2Y81dunoGVKrfVodCe57l5P2QjwJUxvtPs=
+github.com/pixelate-it/molten v0.0.0-20260807231315-d308948f6860/go.mod h1:db1eATzjVipDsEZk6YWhFlpkZJ709o5GQJ1Ct73aS8s=
+google.golang.org/protobuf v1.36.11 h1:fV6ZwhNocDyBLK0dj+fg8ektcVegBBuEolpbTQyBNVE=
+google.golang.org/protobuf v1.36.11/go.mod h1:HTf+CrKn2C3g5S8VImy6tdcUvCska2kB7j23XfzDpco=
