@@ -12,18 +12,17 @@ import (
 	"github.com/pixelate-it/molten/canvas"
 	"github.com/pixelate-it/molten/format"
 	"runtime"
-	
 	"net/http"
 	"strings"
 )
 
-
-func printMemUsage() {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	
-	fmt.Printf("[MEM] Mem : %v MB | Vsego videlal: %v MB\n", m.Alloc/1024/1024, m.TotalAlloc/1024/1024)
-}
+//test memory usage
+//func printMemUsage() {
+//	var m runtime.MemStats
+//	runtime.ReadMemStats(&m)
+//	fmt.Printf("[MEM] Mem : %v MB | Vsego videlal: %v MB\n", m.Alloc/1024/1024, m.TotalAlloc/1024/1024)
+//}
+//
 
 var errUsage = fmt.Errorf("invalid arguments")
 
@@ -150,6 +149,18 @@ func runDetect(args []string) error {
 			return fmt.Errorf("read chunk error: %w", err)
 		}
 
+		if kf := chunk.GetKeyframe(); kf != nil {
+        
+        width = kf.GetWidth()
+		height = kf.GetHeight()
+        for _, p := range kf.Pixels {
+            state.ApplySinglePixel(p)
+        }
+
+        log.Printf("[LIVE] new size: %dx%d", width, height)
+        continue 
+		}
+	
 		if chunk.GetDelta() != nil {
 			ordered, _ := format.PlacementOrder(chunk.GetDelta())
 
