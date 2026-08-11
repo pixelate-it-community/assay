@@ -9,9 +9,11 @@ import (
 	"log"
 	"os"
 	"time"
+
 	"github.com/pixelate-it/molten/canvas"
 	"github.com/pixelate-it/molten/format"
-	"runtime"
+
+	//"runtime"
 	"net/http"
 	"strings"
 )
@@ -30,6 +32,7 @@ type Pattern struct {
 	Name   string  `json:"name"`
 	Matrix [][]int `json:"matrix"`
 }
+
 var forbiddenPatterns []Pattern
 
 func loadPatterns(path string) ([]Pattern, error) {
@@ -150,21 +153,24 @@ func runDetect(args []string) error {
 		}
 
 		if kf := chunk.GetKeyframe(); kf != nil {
-        
-        width = kf.GetWidth()
-		height = kf.GetHeight()
-        for _, p := range kf.Pixels {
-            state.ApplySinglePixel(p)
-        }
+			width = kf.GetWidth()
+			height = kf.GetHeight()
 
-        log.Printf("[LIVE] new size: %dx%d", width, height)
-        continue 
+			// Обязательно обновляем размер виртуального холста!
+			state.Resize(width, height)
+
+			for _, p := range kf.Pixels {
+				state.ApplySinglePixel(p)
+			}
+
+			log.Printf("[LIVE] new size: %dx%d", width, height)
+			continue
 		}
-	
+
 		if chunk.GetDelta() != nil {
 			ordered, _ := format.PlacementOrder(chunk.GetDelta())
 
-			for _, p := range ordered {		
+			for _, p := range ordered {
 
 				state.ApplySinglePixel(p)
 
@@ -177,14 +183,13 @@ func runDetect(args []string) error {
 
 				if checkPatternsAround(state, int(width), int(height), x, y, p.Color) {
 					detectionsCount++
-					
+
 				}
 			}
-			
+
 		}
-		
+
 	}
-	
 
 	log.Printf("Analysis complete. Total matches found: %d\n", detectionsCount)
 	return nil
@@ -204,7 +209,7 @@ func checkPatternsAround(state *canvas.State, width, height, x, y int, targetCol
 					startY := y - r
 
 					if matchPattern(state, width, height, startX, startY, pat.Matrix, targetColor) {
-						fmt.Printf("[!] DETECTED PATTERN: '%s' | Coords: (%d, %d) | Color: #%06X\n",
+						log.Printf("[!] DETECTED PATTERN: '%s' | Coords: (%d, %d) | Color: #%06X\n",
 							pat.Name, startX, startY, targetColor)
 						detected = true
 					}
@@ -217,38 +222,38 @@ func checkPatternsAround(state *canvas.State, width, height, x, y int, targetCol
 }
 
 func matchPattern(state *canvas.State, width, height, startX, startY int, matrix [][]int, targetColor uint32) bool {
-	var bgColor uint32
-	hasBgColor := false
+	// Погрешность цвета (квадрат расстояния RGB).
+	// 0 = точное совпадение, 1000-2000 = легкие оттенки, 5000+ = сильный разброс.
+	tolerance := 1500
 
 	for r := 0; r < len(matrix); r++ {
 		for c := 0; c < len(matrix[0]); c++ {
 			expected := matrix[r][c]
 			if expected == -1 {
-				continue
+				continue // -1 пропускаем, тут может быть что угодно
 			}
 
 			px := startX + c
 			py := startY + r
 
+			// Проверка выхода за границы холста
 			if px < 0 || py < 0 || px >= width || py >= height {
 				return false
 			}
 
 			currentColor := getColorAt(state, px, py)
 
+			// Проверяем, похож ли цвет на холсте на цвет нашей искомой фигуры
+			isTarget := isSimilarColor(currentColor, targetColor, tolerance)
+
 			if expected == 1 {
-				if currentColor != targetColor {
+				// Здесь должна быть часть фигуры. Если цвет не похож — это не наша фигура.
+				if !isTarget {
 					return false
 				}
 			} else if expected == 0 {
-				if currentColor == targetColor {
-					return false
-				}
-
-				if !hasBgColor {
-					bgColor = currentColor
-					hasBgColor = true
-				} else if currentColor != bgColor {
+				// Здесь должен быть фон. Главное правило: фон НЕ должен сливаться с фигурой.
+				if isTarget {
 					return false
 				}
 			}
@@ -258,4 +263,20 @@ func matchPattern(state *canvas.State, width, height, startX, startY int, matrix
 	return true
 }
 
+// isSimilarColor вычисляет разницу между двумя HEX-цветами
+func isSimilarColor(c1, c2 uint32, tolerance int) bool {
+	// Разбиваем первый цвет на R, G, B
+	r1 := int((c1 >> 16) & 0xFF)
+	g1 := int((c1 >> 8) & 0xFF)
+	b1 := int(c1 & 0xFF)
 
+	// Разбиваем второй цвет на R, G, B
+	r2 := int((c2 >> 16) & 0xFF)
+	g2 := int((c2 >> 8) & 0xFF)
+	b2 := int(c2 & 0xFF)
+
+	// Вычисляем квадрат расстояния между цветами в пространстве RGB
+	dist := (r1-r2)*(r1-r2) + (g1-g2)*(g1-g2) + (b1-b2)*(b1-b2)
+
+	return dist <= tolerance
+}
