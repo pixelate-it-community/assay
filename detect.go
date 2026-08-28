@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -66,13 +67,7 @@ func getColorAt(state *canvas.State, x, y int) uint32 {
 func runDetect(args []string) error {
 	fs := flag.NewFlagSet("detect", flag.ContinueOnError)
 	inputPath := fs.String("in", "", "path to .mltn file (required)")
-	//
-	//
-	// PATH zapretki. Mirdukkk Pri Peremeshenii ili izmenenenii faila ychti
 	patternsPath := fs.String("patterns", "zapret.json", "path to forbidden patterns JSON file")
-	//
-	//
-	//
 	liveMode := fs.Bool("live", false, "watch file continuously in live mode")
 
 	if err := fs.Parse(args); err != nil {
@@ -84,7 +79,7 @@ func runDetect(args []string) error {
 		return errUsage
 	}
 
-	// 1. Load forbidden patterns from JSON
+	// 1. Загрузка паттернов
 	var err error
 	forbiddenPatterns, err = loadPatterns(*patternsPath)
 	if err != nil {
@@ -92,7 +87,7 @@ func runDetect(args []string) error {
 	}
 	log.Printf("[INFO] Loaded %d forbidden patterns from '%s'", len(forbiddenPatterns), *patternsPath)
 
-	// 2. Open the canvas recording (local file or HTTP/HTTPS live stream)
+	// 2. Открытие файла или стрима
 	var r io.ReadCloser
 	if strings.HasPrefix(*inputPath, "http://") || strings.HasPrefix(*inputPath, "https://") {
 		resp, err := http.Get(*inputPath)
@@ -114,11 +109,23 @@ func runDetect(args []string) error {
 	}
 	defer r.Close()
 
+	// 3. Создание ридера и чтение Header + первого Resize
 	reader := format.NewChunkReader(bufio.NewReaderSize(r, 64*1024))
-	_, initialKf, width, height, err := format.ReadHeader(reader)
+
+	// В v0.2.0 ReadHeader возвращает (header, openingResize, err)
+	// Назовем переменную openingWindow, так как это уже готовый формат окна
+	_, openingWindow, _, err := format.ReadHeader(reader)
 	if err != nil {
 		return fmt.Errorf("read header error: %w", err)
 	}
+
+	// Инициализируем виртуальный холст через Reframe, сразу передавая окно
+	state := canvas.NewState()
+	state.Reframe(openingWindow)
+
+	// Так как это обычная Go-структура, обращаемся к полям напрямую
+	width := int(openingWindow.Width)
+	height := int(openingWindow.Height)
 
 	if *liveMode {
 		log.Printf("[LIVE MODE] Started pattern detection on canvas %dx%d...", width, height)
@@ -126,25 +133,15 @@ func runDetect(args []string) error {
 		log.Printf("[STATIC MODE] Analyzing canvas %dx%d...", width, height)
 	}
 
-	state := canvas.NewState()
-	state.Resize(width, height)
-	for _, p := range initialKf.Pixels {
-		state.ApplySinglePixel(p)
-	}
-
 	var detectionsCount int
 
+	// 4. Основной цикл чтения чанков
 	for {
 		chunk, err := reader.Next()
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				if *liveMode {
-
-					//time sleep for waiting new write
-					//
-					time.Sleep(10000 * time.Millisecond)
-					//
-					//
+					time.Sleep(1000 * time.Millisecond)
 					continue
 				}
 				break
@@ -152,43 +149,44 @@ func runDetect(args []string) error {
 			return fmt.Errorf("read chunk error: %w", err)
 		}
 
-		if kf := chunk.GetKeyframe(); kf != nil {
-			width = kf.GetWidth()
-			height = kf.GetHeight()
+		switch {
+		// Реакция на изменение размеров холста (вместо Keyframe)
+		case chunk.GetResize() != nil:
+			resizeChunk := chunk.GetResize()
+			width = int(resizeChunk.GetWidth())
+			height = int(resizeChunk.GetHeight())
 
-			// Обязательно обновляем размер виртуального холста!
-			state.Resize(width, height)
+			// Встроенный метод canvas.State сам перенесет пиксели на новое окно!
+			state.ApplyResize(resizeChunk)
+			log.Printf("[LIVE] Canvas resized to: %dx%d", width, height)
 
-			for _, p := range kf.Pixels {
-				state.ApplySinglePixel(p)
-			}
+		// Реакция на новые пиксели
+		case chunk.GetDelta() != nil:
+			delta := chunk.GetDelta()
 
-			log.Printf("[LIVE] new size: %dx%d", width, height)
-			continue
-		}
+			// Применяем изменения к состоянию холста
+			state.ApplyDelta(delta)
 
-		if chunk.GetDelta() != nil {
-			ordered, _ := format.PlacementOrder(chunk.GetDelta())
-
+			ordered := format.PlacementOrder(0, delta)
 			for _, p := range ordered {
-
-				state.ApplySinglePixel(p)
-
 				if p.Color == 0xFFFFFF {
 					continue
 				}
 
-				x := int(p.Id) % int(width)
-				y := int(p.Id) / int(width)
+				// НОВОЕ: Берем готовые X и Y напрямую из пикселя!
+				x := int(p.GetX())
+				y := int(p.GetY())
 
-				if checkPatternsAround(state, int(width), int(height), x, y, p.Color) {
+				if checkPatternsAround(state, width, height, x, y, p.Color) {
 					detectionsCount++
-
 				}
 			}
 
+		// Завершение записи (сезон окончен)
+		case chunk.GetFooter() != nil:
+			log.Println("[INFO] Reached recording footer. Analysis finished.")
+			break
 		}
-
 	}
 
 	log.Printf("Analysis complete. Total matches found: %d\n", detectionsCount)

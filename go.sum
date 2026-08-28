@@ -4,5 +4,7 @@ github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
 github.com/pixelate-it/molten v0.1.0 h1:tGAe7OUv8jVjB8RKDpDM61LDXtuja6l33Fto3bbWdlY=
 github.com/pixelate-it/molten v0.1.0/go.mod h1:db1eATzjVipDsEZk6YWhFlpkZJ709o5GQJ1Ct73aS8s=
+github.com/pixelate-it/molten v0.2.0 h1:ET+daVyMepaNE59fuYBAAj9/376SBpH8QGkLgxHzE6I=
+github.com/pixelate-it/molten v0.2.0/go.mod h1:pGpLz7Uq7aKUywcymar5y/FYW6gzOIVGBT/kA05aHls=
 google.golang.org/protobuf v1.36.12 h1:pJOKDDOyeXErUroCihFAd5LQuwXBSpVnKGrj5o/fwxc=
 google.golang.org/protobuf v1.36.12/go.mod h1:HTf+CrKn2C3g5S8VImy6tdcUvCska2kB7j23XfzDpco=
