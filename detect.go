@@ -8,24 +8,15 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/pixelate-it/molten/canvas"
 	"github.com/pixelate-it/molten/format"
-
-	//"runtime"
-	"net/http"
-	"strings"
 )
-
-//test memory usage
-//func printMemUsage() {
-//	var m runtime.MemStats
-//	runtime.ReadMemStats(&m)
-//	fmt.Printf("[MEM] Mem : %v MB | Vsego videlal: %v MB\n", m.Alloc/1024/1024, m.TotalAlloc/1024/1024)
-//}
-//
 
 var errUsage = fmt.Errorf("invalid arguments")
 
@@ -47,7 +38,24 @@ func loadPatterns(path string) ([]Pattern, error) {
 		return nil, fmt.Errorf("error parsing JSON: %w", err)
 	}
 
+	// Сортировка: сначала фигуры с наибольшим количеством клеток 1
+	sort.Slice(patterns, func(i, j int) bool {
+		return countOnes(patterns[i].Matrix) > countOnes(patterns[j].Matrix)
+	})
+
 	return patterns, nil
+}
+
+func countOnes(matrix [][]int) int {
+	cnt := 0
+	for _, row := range matrix {
+		for _, val := range row {
+			if val == 1 {
+				cnt++
+			}
+		}
+	}
+	return cnt
 }
 
 func getColorAt(state *canvas.State, x, y int) uint32 {
@@ -79,7 +87,6 @@ func runDetect(args []string) error {
 		return errUsage
 	}
 
-	// 1. Загрузка паттернов
 	var err error
 	forbiddenPatterns, err = loadPatterns(*patternsPath)
 	if err != nil {
@@ -87,7 +94,6 @@ func runDetect(args []string) error {
 	}
 	log.Printf("[INFO] Loaded %d forbidden patterns from '%s'", len(forbiddenPatterns), *patternsPath)
 
-	// 2. Открытие файла или стрима
 	var r io.ReadCloser
 	if strings.HasPrefix(*inputPath, "http://") || strings.HasPrefix(*inputPath, "https://") {
 		resp, err := http.Get(*inputPath)
@@ -109,21 +115,16 @@ func runDetect(args []string) error {
 	}
 	defer r.Close()
 
-	// 3. Создание ридера и чтение Header + первого Resize
 	reader := format.NewChunkReader(bufio.NewReaderSize(r, 64*1024))
 
-	// В v0.2.0 ReadHeader возвращает (header, openingResize, err)
-	// Назовем переменную openingWindow, так как это уже готовый формат окна
 	_, openingWindow, _, err := format.ReadHeader(reader)
 	if err != nil {
 		return fmt.Errorf("read header error: %w", err)
 	}
 
-	// Инициализируем виртуальный холст через Reframe, сразу передавая окно
 	state := canvas.NewState()
 	state.Reframe(openingWindow)
 
-	// Так как это обычная Go-структура, обращаемся к полям напрямую
 	width := int(openingWindow.Width)
 	height := int(openingWindow.Height)
 
@@ -135,7 +136,6 @@ func runDetect(args []string) error {
 
 	var detectionsCount int
 
-	// 4. Основной цикл чтения чанков
 	for {
 		chunk, err := reader.Next()
 		if err != nil {
@@ -150,22 +150,21 @@ func runDetect(args []string) error {
 		}
 
 		switch {
-		// Реакция на изменение размеров холста (вместо Keyframe)
 		case chunk.GetResize() != nil:
 			resizeChunk := chunk.GetResize()
 			width = int(resizeChunk.GetWidth())
 			height = int(resizeChunk.GetHeight())
 
-			// Встроенный метод canvas.State сам перенесет пиксели на новое окно!
 			state.ApplyResize(resizeChunk)
 			log.Printf("[LIVE] Canvas resized to: %dx%d", width, height)
 
-		// Реакция на новые пиксели
 		case chunk.GetDelta() != nil:
 			delta := chunk.GetDelta()
 
-			// Применяем изменения к состоянию холста
 			state.ApplyDelta(delta)
+
+			// Карта для предотвращения дублирования совпадений в рамках одного чанка
+			detectedThisChunk := make(map[string]bool)
 
 			ordered := format.PlacementOrder(0, delta)
 			for _, p := range ordered {
@@ -173,16 +172,12 @@ func runDetect(args []string) error {
 					continue
 				}
 
-				// НОВОЕ: Берем готовые X и Y напрямую из пикселя!
 				x := int(p.GetX())
 				y := int(p.GetY())
 
-				if checkPatternsAround(state, width, height, x, y, p.Color) {
-					detectionsCount++
-				}
+				detectionsCount += checkPatternsAround(state, width, height, x, y, p.Color, detectedThisChunk)
 			}
 
-		// Завершение записи (сезон окончен)
 		case chunk.GetFooter() != nil:
 			log.Println("[INFO] Reached recording footer. Analysis finished.")
 			break
@@ -193,8 +188,8 @@ func runDetect(args []string) error {
 	return nil
 }
 
-func checkPatternsAround(state *canvas.State, width, height, x, y int, targetColor uint32) bool {
-	detected := false
+func checkPatternsAround(state *canvas.State, width, height, x, y int, targetColor uint32, detectedThisChunk map[string]bool) int {
+	newDetections := 0
 
 	for _, pat := range forbiddenPatterns {
 		rows := len(pat.Matrix)
@@ -206,74 +201,82 @@ func checkPatternsAround(state *canvas.State, width, height, x, y int, targetCol
 					startX := x - c
 					startY := y - r
 
+					// Формируем уникальный ключ найденной фигуры
+					key := fmt.Sprintf("%s:%d:%d", pat.Name, startX, startY)
+
+					// Если уже находили эту фигуру в текущем Delta-чанке, проскакиваем
+					if detectedThisChunk[key] {
+						continue
+					}
+
 					if matchPattern(state, width, height, startX, startY, pat.Matrix, targetColor) {
 						log.Printf("[!] DETECTED PATTERN: '%s' | Coords: (%d, %d) | Color: #%06X\n",
 							pat.Name, startX, startY, targetColor)
-						detected = true
+						detectedThisChunk[key] = true
+						newDetections++
 					}
 				}
 			}
 		}
 	}
 
-	return detected
+	return newDetections
 }
 
 func matchPattern(state *canvas.State, width, height, startX, startY int, matrix [][]int, targetColor uint32) bool {
-	// Погрешность цвета (квадрат расстояния RGB).
-	// 0 = точное совпадение, 1000-2000 = легкие оттенки, 5000+ = сильный разброс.
-	tolerance := 1500
+	tolerance := 3500 // Оптимальный разброс цвета для шума
+
+	totalOnePixels := 0
+	matchedOnePixels := 0
 
 	for r := 0; r < len(matrix); r++ {
 		for c := 0; c < len(matrix[0]); c++ {
 			expected := matrix[r][c]
 			if expected == -1 {
-				continue // -1 пропускаем, тут может быть что угодно
+				continue
 			}
 
 			px := startX + c
 			py := startY + r
 
-			// Проверка выхода за границы холста
 			if px < 0 || py < 0 || px >= width || py >= height {
 				return false
 			}
 
 			currentColor := getColorAt(state, px, py)
-
-			// Проверяем, похож ли цвет на холсте на цвет нашей искомой фигуры
 			isTarget := isSimilarColor(currentColor, targetColor, tolerance)
 
+			// Шаг 1: Если на месте 0 стоит цвет фигуры — это ДРУГАЯ (более крупная) фигура
+			if expected == 0 && isTarget {
+				return false
+			}
+
 			if expected == 1 {
-				// Здесь должна быть часть фигуры. Если цвет не похож — это не наша фигура.
-				if !isTarget {
-					return false
-				}
-			} else if expected == 0 {
-				// Здесь должен быть фон. Главное правило: фон НЕ должен сливаться с фигурой.
+				totalOnePixels++
 				if isTarget {
-					return false
+					matchedOnePixels++
 				}
 			}
 		}
 	}
 
-	return true
+	if totalOnePixels == 0 {
+		return false
+	}
+
+	// Шаг 3: Подняли порог до 85% совпадения
+	return (float64(matchedOnePixels) / float64(totalOnePixels)) >= 0.85
 }
 
-// isSimilarColor вычисляет разницу между двумя HEX-цветами
 func isSimilarColor(c1, c2 uint32, tolerance int) bool {
-	// Разбиваем первый цвет на R, G, B
 	r1 := int((c1 >> 16) & 0xFF)
 	g1 := int((c1 >> 8) & 0xFF)
 	b1 := int(c1 & 0xFF)
 
-	// Разбиваем второй цвет на R, G, B
 	r2 := int((c2 >> 16) & 0xFF)
 	g2 := int((c2 >> 8) & 0xFF)
 	b2 := int(c2 & 0xFF)
 
-	// Вычисляем квадрат расстояния между цветами в пространстве RGB
 	dist := (r1-r2)*(r1-r2) + (g1-g2)*(g1-g2) + (b1-b2)*(b1-b2)
 
 	return dist <= tolerance
