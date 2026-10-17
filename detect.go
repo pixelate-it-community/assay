@@ -16,6 +16,7 @@ import (
 
 	"github.com/pixelate-it/molten/canvas"
 	"github.com/pixelate-it/molten/format"
+	"github.com/pixelate-it/molten/ore"
 )
 
 var errUsage = fmt.Errorf("invalid arguments")
@@ -94,7 +95,10 @@ func runDetect(args []string) error {
 	}
 	log.Printf("[INFO] Loaded %d forbidden patterns from '%s'", len(forbiddenPatterns), *patternsPath)
 
+	// 2. Открытие файла или стрима
 	var r io.ReadCloser
+	var localFile *os.File
+
 	if strings.HasPrefix(*inputPath, "http://") || strings.HasPrefix(*inputPath, "https://") {
 		resp, err := http.Get(*inputPath)
 		if err != nil {
@@ -107,19 +111,43 @@ func runDetect(args []string) error {
 		r = resp.Body
 		log.Printf("[INFO] Connected to live HTTP stream: %s", *inputPath)
 	} else {
-		r, err = os.Open(*inputPath)
+		localFile, err = os.Open(*inputPath)
 		if err != nil {
 			return fmt.Errorf("open file error: %w", err)
 		}
+		r = localFile
 		log.Printf("[INFO] Opened local file: %s", *inputPath)
 	}
 	defer r.Close()
 
-	reader := format.NewChunkReader(bufio.NewReaderSize(r, 64*1024))
+	// 3. Чтение заголовка
+	// ReadHeader требует *format.ChunkReader. Мы создаем его без bufio для live-файла,
+	// чтобы не сбить системный указатель смещения (offset) внутри файла.
+	var cr *format.ChunkReader
+	if *liveMode && localFile != nil {
+		cr = format.NewChunkReader(localFile)
+	} else {
+		cr = format.NewChunkReader(bufio.NewReaderSize(r, 64*1024))
+	}
 
-	_, openingWindow, _, err := format.ReadHeader(reader)
+	_, openingWindow, _, err := format.ReadHeader(cr)
 	if err != nil {
 		return fmt.Errorf("read header error: %w", err)
+	}
+
+	// 4. Настройка ридера для основного цикла
+	var reader interface {
+		Next() (*ore.RecordingChunk, error)
+	}
+
+	if *liveMode && localFile != nil {
+		reader = format.NewTailReader(localFile)
+		log.Println("[INFO] Using format.TailReader for live file watching")
+	} else {
+		reader = cr
+		if *liveMode {
+			log.Println("[INFO] Using format.ChunkReader for live HTTP stream")
+		}
 	}
 
 	state := canvas.NewState()
@@ -136,12 +164,19 @@ func runDetect(args []string) error {
 
 	var detectionsCount int
 
+	// Если не live-режим, мы считываем всё с выводом. Если live — сначала прогреваем холст молча.
+	caughtUp := !*liveMode
+
 	for {
 		chunk, err := reader.Next()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				if *liveMode {
-					time.Sleep(1000 * time.Millisecond)
+					if !caughtUp {
+						log.Println("[LIVE] История проиграна. Начинаю мониторинг новых данных...")
+						caughtUp = true
+					}
+					time.Sleep(500 * time.Millisecond)
 					continue
 				}
 				break
@@ -156,29 +191,40 @@ func runDetect(args []string) error {
 			height = int(resizeChunk.GetHeight())
 
 			state.ApplyResize(resizeChunk)
-			log.Printf("[LIVE] Canvas resized to: %dx%d", width, height)
+
+			// Логируем ресайз холста только когда догнали хвост (или в статике)
+			if caughtUp {
+				log.Printf("[LIVE] Canvas resized to: %dx%d", width, height)
+			}
 
 		case chunk.GetDelta() != nil:
 			delta := chunk.GetDelta()
 
+			// ВСЕГДА применяем дельту, чтобы виртуальный холст (state) был актуальным
 			state.ApplyDelta(delta)
 
-			// Карта для предотвращения дублирования совпадений в рамках одного чанка
-			detectedThisChunk := make(map[string]bool)
+			// ИЩЕМ ПАТТЕРНЫ И ВЫВОДИМ ЛОГИ ТОЛЬКО ТОГДА, КОГДА ДОГНАЛИ ХВОСТ!
+			if caughtUp {
+				detectedThisChunk := make(map[string]bool)
 
-			ordered := format.PlacementOrder(0, delta)
-			for _, p := range ordered {
-				if p.Color == 0xFFFFFF {
-					continue
+				ordered := format.PlacementOrder(0, delta)
+				for _, p := range ordered {
+					if p.Color == 0xFFFFFF {
+						continue
+					}
+
+					x := int(p.GetX())
+					y := int(p.GetY())
+
+					detectionsCount += checkPatternsAround(state, width, height, x, y, p.Color, detectedThisChunk)
 				}
-
-				x := int(p.GetX())
-				y := int(p.GetY())
-
-				detectionsCount += checkPatternsAround(state, width, height, x, y, p.Color, detectedThisChunk)
 			}
 
 		case chunk.GetFooter() != nil:
+			// Если включен флаг -live, но мы встретили Footer — значит, запись уже закончена
+			if *liveMode {
+				return fmt.Errorf("error: -live flag cannot be used on a completed recording that contains a footer")
+			}
 			log.Println("[INFO] Reached recording footer. Analysis finished.")
 			break
 		}
